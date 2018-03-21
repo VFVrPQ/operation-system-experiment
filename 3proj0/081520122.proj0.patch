@@ -1,0 +1,152 @@
+diff -uNr proj0-base/Makefile proj0-revise/Makefile
+--- proj0-base/Makefile	2018-03-15 13:55:42.000000000 +0000
++++ proj0-revise/Makefile	2018-03-21 12:54:51.773975902 +0000
+@@ -138,6 +138,7 @@
+ 
+ ULIB = ulib.o usys.o printf.o umalloc.o
+ 
++# 增加print
+ _%: %.o $(ULIB)
+ 	$(LD) $(LDFLAGS) -N -e main -Ttext 0 -o $@ $^
+ 	$(OBJDUMP) -S $@ > $*.asm
+@@ -166,6 +167,8 @@
+ 	_sh\
+ 	_wc\
+ 	_zombie\
++	_print22\
++	_shutdown\
+ 
+ fs.img: mkfs README $(UPROGS)
+ 	./mkfs fs.img README $(UPROGS)
+diff -uNr proj0-base/print22.c proj0-revise/print22.c
+--- proj0-base/print22.c	1970-01-01 00:00:00.000000000 +0000
++++ proj0-revise/print22.c	2018-03-21 11:20:39.157348016 +0000
+@@ -0,0 +1,14 @@
++#include "types.h"
++#include "stat.h"
++#include "user.h"
++
++int
++main(int argc, char *argv[])
++{
++  int i;
++
++  printf(1, "%s", "OS Lab 081520122: ");
++  for(i = 1; i < argc; i++)
++    printf(1, "%s%s", argv[i], i+1 < argc ? " " : "\n");
++  exit();
++}
+diff -uNr proj0-base/proc.c proj0-revise/proc.c
+--- proj0-base/proc.c	2018-03-04 14:13:10.000000000 +0000
++++ proj0-revise/proc.c	2018-03-21 13:23:10.275556470 +0000
+@@ -496,6 +496,11 @@
+   return -1;
+ }
+ 
++void shutdown(void){
++  outw(0xB004, 0x0|0x2000);
++  return ;
++}
++
+ //PAGEBREAK: 36
+ // Print a process listing to console.  For debugging.
+ // Runs when user types ^P on console.
+@@ -531,4 +536,4 @@
+     }
+     cprintf("\n");
+   }
+-}
++}
+\ No newline at end of file
+diff -uNr proj0-base/shutdown.c proj0-revise/shutdown.c
+--- proj0-base/shutdown.c	1970-01-01 00:00:00.000000000 +0000
++++ proj0-revise/shutdown.c	2018-03-21 12:56:32.441893266 +0000
+@@ -0,0 +1,10 @@
++#include "types.h"
++#include "stat.h"
++#include "user.h"
++
++int
++main(int argc, char **argv)
++{
++  shutdown();
++  return 0;
++}
+diff -uNr proj0-base/syscall.c proj0-revise/syscall.c
+--- proj0-base/syscall.c	2018-03-04 14:13:10.000000000 +0000
++++ proj0-revise/syscall.c	2018-03-21 13:45:46.770234694 +0000
+@@ -22,6 +22,7 @@
+   if(addr >= curproc->sz || addr+4 > curproc->sz)
+     return -1;
+   *ip = *(int*)(addr);
++  //cprintf("argu: %d\n", *ip);
+   return 0;
+ }
+ 
+@@ -42,6 +43,7 @@
+     if(*s == 0)
+       return s - *pp;
+   }
++  //cprintf("argu: %s\n", *pp);
+   return -1;
+ }
+ 
+@@ -103,6 +105,7 @@
+ extern int sys_wait(void);
+ extern int sys_write(void);
+ extern int sys_uptime(void);
++extern int sys_shutdown(void);
+ 
+ static int (*syscalls[])(void) = {
+ [SYS_fork]    sys_fork,
+@@ -126,6 +129,7 @@
+ [SYS_link]    sys_link,
+ [SYS_mkdir]   sys_mkdir,
+ [SYS_close]   sys_close,
++[SYS_shutdown] sys_shutdown,
+ };
+ 
+ void
+diff -uNr proj0-base/syscall.h proj0-revise/syscall.h
+--- proj0-base/syscall.h	2018-03-04 14:13:10.000000000 +0000
++++ proj0-revise/syscall.h	2018-03-21 13:42:37.831375864 +0000
+@@ -20,3 +20,4 @@
+ #define SYS_link   19
+ #define SYS_mkdir  20
+ #define SYS_close  21
++#define SYS_shutdown 22
+\ No newline at end of file
+diff -uNr proj0-base/sysproc.c proj0-revise/sysproc.c
+--- proj0-base/sysproc.c	2018-03-04 14:13:10.000000000 +0000
++++ proj0-revise/sysproc.c	2018-03-21 13:46:16.480571227 +0000
+@@ -89,3 +89,10 @@
+   release(&tickslock);
+   return xticks;
+ }
++//shutdown
++int
++sys_shutdown(void)
++{
++  outw(0xB004, 0x0|0x2000);
++  return 0;
++}
+\ No newline at end of file
+diff -uNr proj0-base/user.h proj0-revise/user.h
+--- proj0-base/user.h	2018-03-04 14:13:10.000000000 +0000
++++ proj0-revise/user.h	2018-03-21 12:53:14.646336992 +0000
+@@ -23,6 +23,7 @@
+ char* sbrk(int);
+ int sleep(int);
+ int uptime(void);
++void shutdown(void);
+ 
+ // ulib.c
+ int stat(char*, struct stat*);
+diff -uNr proj0-base/usys.S proj0-revise/usys.S
+--- proj0-base/usys.S	2018-03-04 14:13:10.000000000 +0000
++++ proj0-revise/usys.S	2018-03-21 13:51:01.222964970 +0000
+@@ -29,3 +29,4 @@
+ SYSCALL(sbrk)
+ SYSCALL(sleep)
+ SYSCALL(uptime)
++SYSCALL(shutdown)
