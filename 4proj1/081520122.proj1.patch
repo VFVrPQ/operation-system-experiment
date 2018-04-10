@@ -1,0 +1,170 @@
+diff -uNr proj1-base/proc.c proj1-revise/proc.c
+--- proj1-base/proc.c	2018-03-16 05:59:20.000000000 +0000
++++ proj1-revise/proc.c	2018-04-10 03:16:58.583246294 +0000
+@@ -14,6 +14,7 @@
+ 
+ static struct proc *initproc;
+ 
++int fork_son_first=0;
+ int nextpid = 1;
+ extern void forkret(void);
+ extern void trapret(void);
+@@ -183,7 +184,8 @@
+   int i, pid;
+   struct proc *np;
+   struct proc *curproc = myproc();
+-
++  //int tmp;
++  
+   // Allocate process.
+   if((np = allocproc()) == 0){
+     return -1;
+@@ -198,6 +200,7 @@
+   }
+   np->sz = curproc->sz;
+   np->parent = curproc;
++  
+   *np->tf = *curproc->tf;
+ 
+   // Clear %eax so that fork returns 0 in the child.
+@@ -213,11 +216,32 @@
+   pid = np->pid;
+ 
+   acquire(&ptable.lock);
+-
+   np->state = RUNNABLE;
+ 
+-  release(&ptable.lock);
++  /*if (fork_son_first>0){
++    tmp = np->pid;
++    np->pid = curproc->pid;
++    curproc->pid = tmp;
++    
++    pid = np->pid;
++  }*/
++  /*if (fork_son_first>0){
++    //sti();
++    struct cpu *c = mycpu();
++    c->proc = 0;
++    c->proc = np;
++    switchuvm(np);
++    np->state = RUNNING;
++    swtch(&(c->scheduler), np->context);
++    switchkvm();
++    c->proc = 0;  
++  }*/
++  //cprintf("%d\n",fork_son_first);
+ 
++  release(&ptable.lock);
++  if (fork_son_first>0){
++    yield();
++  }
+   return pid;
+ }
+ 
+@@ -332,10 +356,10 @@
+ 
+     // Loop over process table looking for process to run.
+     acquire(&ptable.lock);
+-    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
++      for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+       if(p->state != RUNNABLE)
+         continue;
+-
++      
+       // Switch to chosen process.  It is the process's job
+       // to release ptable.lock and then reacquire it
+       // before jumping back to us.
+diff -uNr proj1-base/proc.h proj1-revise/proc.h
+--- proj1-base/proc.h	2018-03-16 05:59:20.000000000 +0000
++++ proj1-revise/proc.h	2018-04-10 02:02:40.783805697 +0000
+@@ -55,4 +55,4 @@
+ //   text
+ //   original data and bss
+ //   fixed-size stack
+-//   expandable heap
++//   expandable heap
+\ No newline at end of file
+diff -uNr proj1-base/shutdown.c proj1-revise/shutdown.c
+--- proj1-base/shutdown.c	2018-03-16 06:10:40.000000000 +0000
++++ proj1-revise/shutdown.c	2018-04-01 13:14:27.361402364 +0000
+@@ -2,11 +2,13 @@
+ #include "stat.h"
+ #include "user.h"
+ 
+-extern int shutdown();
++extern int shutdown(int);
+ 
+ int
+ main(int argc, char *argv[])
+ {
+-  shutdown();
++  if (argc<2)
++    return -1;
++  shutdown(atoi(argv[1]));
+   exit();
+ }
+diff -uNr proj1-base/syscall.c proj1-revise/syscall.c
+--- proj1-base/syscall.c	2018-03-16 06:07:42.000000000 +0000
++++ proj1-revise/syscall.c	2018-04-10 03:14:32.815232141 +0000
+@@ -104,6 +104,7 @@
+ extern int sys_write(void);
+ extern int sys_uptime(void);
+ extern int sys_shutdown(void);
++extern int sys_fork_winner(void);
+ 
+ static int (*syscalls[])(void) = {
+ [SYS_fork]    sys_fork,
+@@ -128,6 +129,7 @@
+ [SYS_mkdir]   sys_mkdir,
+ [SYS_close]   sys_close,
+ [SYS_shutdown] sys_shutdown,
++[SYS_fork_winner] sys_fork_winner,
+ };
+ 
+ void
+diff -uNr proj1-base/sysproc.c proj1-revise/sysproc.c
+--- proj1-base/sysproc.c	2018-03-16 06:10:06.000000000 +0000
++++ proj1-revise/sysproc.c	2018-04-10 01:34:50.074099186 +0000
+@@ -7,10 +7,17 @@
+ #include "mmu.h"
+ #include "proc.h"
+ 
++extern 
++int fork_son_first;
++
+ int
+ sys_fork(void)
+ {
+-  return fork();
++  int pid = fork();
++  if (fork_son_first>0){
++    
++  }
++  return pid;
+ }
+ 
+ int
+@@ -92,6 +99,21 @@
+ 
+ int
+ sys_shutdown(void){
++  int a;
++  if (argint(0,&a)<0)
++    return -1;
++  cprintf("Leaving with code %d.\n",a);
+   outw(0xB004, 0x0|0x2000);
+   return 0;
++}
++
++int 
++sys_fork_winner(void){
++  int winner;
++  if (argint(0,&winner)<0)
++    return -1;
++  //cprintf("winner=%d\n",winner);
++  fork_son_first=winner;
++  
++  return 0;
+ }
+\ No newline at end of file
