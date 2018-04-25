@@ -1,0 +1,553 @@
+diff -uNr proj2-base/defs.h proj2-revise/defs.h
+--- proj2-base/defs.h	2018-04-08 12:04:18.000000000 +0000
++++ proj2-revise/defs.h	2018-04-25 06:01:38.414119615 +0000
+@@ -121,6 +121,12 @@
+ void            wakeup(void*);
+ void            yield(void);
+ 
++int             clone(void * (*)(void *), void *, void *);
++void            join(int , void **, void **);
++void            thread_exit(void *);
++int             enable_sched_display(int);
++int             set_priority(int, int);
++
+ // swtch.S
+ void            swtch(struct context**, struct context*);
+ 
+diff -uNr proj2-base/param.h proj2-revise/param.h
+--- proj2-base/param.h	2018-04-08 12:04:18.000000000 +0000
++++ proj2-revise/param.h	2018-04-25 05:32:28.871731226 +0000
+@@ -12,3 +12,4 @@
+ #define NBUF         (MAXOPBLOCKS*3)  // size of disk block cache
+ #define FSSIZE       1000  // size of file system in blocks
+ 
++#define USTACKSIZE 4096
+\ No newline at end of file
+diff -uNr proj2-base/proc.c proj2-revise/proc.c
+--- proj2-base/proc.c	2018-04-08 12:04:18.000000000 +0000
++++ proj2-revise/proc.c	2018-04-25 13:30:13.589504733 +0000
+@@ -14,6 +14,9 @@
+ 
+ static struct proc *initproc;
+ 
++int display_enabled = 0;
++int prior_new = 0;
++
+ int nextpid = 1;
+ extern void forkret(void);
+ extern void trapret(void);
+@@ -96,8 +99,12 @@
+     p->state = UNUSED;
+     return 0;
+   }
+-  sp = p->kstack + KSTACKSIZE;
+-
++  
++  set_priority(p->pid, 2);
++  
++  sp = p->kstack + KSTACKSIZE - 1;
++  *(char*)sp = 0;//isthread
++  
+   // Leave room for trap frame.
+   sp -= sizeof *p->tf;
+   p->tf = (struct trapframe*)sp;
+@@ -213,7 +220,7 @@
+   pid = np->pid;
+ 
+   acquire(&ptable.lock);
+-
++  
+   np->state = RUNNABLE;
+ 
+   release(&ptable.lock);
+@@ -230,6 +237,7 @@
+   struct proc *curproc = myproc();
+   struct proc *p;
+   int fd;
++  char *isthread;
+ 
+   if(curproc == initproc)
+     panic("init exiting");
+@@ -255,9 +263,22 @@
+   // Pass abandoned children to init.
+   for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+     if(p->parent == curproc){
+-      p->parent = initproc;
+-      if(p->state == ZOMBIE)
+-        wakeup1(initproc);
++      isthread = (char*)((uint)p->kstack + KSTACKSIZE - 1);
++      if (*isthread == 1){
++        //son thread need free resources
++        kfree(p->kstack);
++        p->kstack = 0;
++        //freevm(p->pgdir);
++        p->pid = 0;
++        p->parent = 0;
++        p->name[0] = 0;
++        p->killed = 0;
++        p->state = UNUSED;
++      }else{
++        p->parent = initproc;
++        if(p->state == ZOMBIE)
++          wakeup1(initproc);
++      }
+     }
+   }
+ 
+@@ -322,6 +343,7 @@
+ void
+ scheduler(void)
+ {
++  int i,flag;
+   struct proc *p;
+   struct cpu *c = mycpu();
+   c->proc = 0;
+@@ -331,27 +353,38 @@
+     sti();
+ 
+     // Loop over process table looking for process to run.
+-    acquire(&ptable.lock);
+-    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+-      if(p->state != RUNNABLE)
+-        continue;
+-
+-      // Switch to chosen process.  It is the process's job
+-      // to release ptable.lock and then reacquire it
+-      // before jumping back to us.
+-      c->proc = p;
+-      switchuvm(p);
+-      p->state = RUNNING;
+-
+-      swtch(&(c->scheduler), p->context);
+-      switchkvm();
+-
+-      // Process is done running for now.
+-      // It should have changed its p->state before coming back.
+-      c->proc = 0;
++    acquire(&ptable.lock); 
++    prior_new = 0;
++    for (i=1;i<=3;){
++      flag=0;
++      for(p = ptable.proc; p < &ptable.proc[NPROC]; p++)if (p->prior == i){
++        if(p->state != RUNNABLE)
++          continue;
++  
++        // Switch to chosen process.  It is the process's job
++        // to release ptable.lock and then reacquire it
++        // before jumping back to us.
++        c->proc = p;
++        switchuvm(p);
++        p->state = RUNNING;
++  
++        swtch(&(c->scheduler), p->context);
++        switchkvm();
++  
++        // Process is done running for now.
++        // It should have changed its p->state before coming back.
++        c->proc = 0;
++        
++        flag=1;
++      }
++      if (prior_new > 0 && prior_new < i){
++        prior_new = 0;
++        break;
++      }
++      if (!flag) i++;
+     }
++    
+     release(&ptable.lock);
+-
+   }
+ }
+ 
+@@ -376,6 +409,8 @@
+     panic("sched running");
+   if(readeflags()&FL_IF)
+     panic("sched interruptible");
++  if (display_enabled)
++    cprintf("%d - ",p->pid);
+   intena = mycpu()->intena;
+   swtch(&p->context, mycpu()->scheduler);
+   mycpu()->intena = intena;
+@@ -460,8 +495,11 @@
+   struct proc *p;
+ 
+   for(p = ptable.proc; p < &ptable.proc[NPROC]; p++)
+-    if(p->state == SLEEPING && p->chan == chan)
++    if(p->state == SLEEPING && p->chan == chan){
+       p->state = RUNNABLE;
++      if (prior_new == 0) prior_new = p->prior;
++        else if (p->prior < prior_new) prior_new = p->prior;
++    }
+ }
+ 
+ // Wake up all processes sleeping on chan.
+@@ -532,3 +570,175 @@
+     cprintf("\n");
+   }
+ }
++
++int clone(void * (*fn)(void *), void *stack, void *arg){
++  int i, pid;
++  struct proc *np;
++  struct proc *curproc = myproc();
++  void *sp;
++  char *isthread;
++  char *curproc_isthread;
++  
++  // Allocate process.
++  if((np = allocproc()) == 0){
++    return -1;
++  }
++
++  // Copy process state from proc.
++  np->pgdir = curproc->pgdir;
++  np->sz = curproc->sz;
++  *np->tf = *curproc->tf;
++
++  //np->parent
++  //free for convience
++  curproc_isthread = (char*)((uint)curproc->kstack + KSTACKSIZE - 1);
++  if (*curproc_isthread == 1)
++    np->parent = curproc->parent;
++  else 
++    np->parent = curproc;
++    
++  //stack
++  np->stack = (char*)stack;
++  sp = (char*)stack + USTACKSIZE - 4;
++  *(uint*)sp = (uint)arg;
++  
++  sp-=4;
++  *(uint*)sp = 0xffffffff;
++  
++  np->tf->ebp = np->tf->esp = (uint)sp;//bu shi hen dong
++  
++  //ishread is in kernel stack, bottom, also need to change vm.c/switchuvm
++  //only need 1 byte
++  isthread = (char*)((uint)np->kstack + KSTACKSIZE - 1);
++  *(isthread) = 1;
++  
++  //fn
++  np->tf->eip = (uint)fn;
++  
++  // Clear %eax so that fork returns 0 in the child.
++  np->tf->eax = 0;
++
++  for(i = 0; i < NOFILE; i++)
++    if(curproc->ofile[i])
++      np->ofile[i] = filedup(curproc->ofile[i]);
++  np->cwd = idup(curproc->cwd);
++
++  safestrcpy(np->name, curproc->name, sizeof(curproc->name));
++
++  pid = np->pid;
++
++  acquire(&ptable.lock);
++
++  np->state = RUNNABLE;
++
++  release(&ptable.lock);
++
++  return pid;
++}
++void join(int tid, void ** ret_p, void ** stack){
++  struct proc *p;
++  int havekids;
++  struct proc *curproc = myproc();
++  char *isthread;
++  
++  acquire(&ptable.lock);
++  for(;;){
++    // Scan through table looking for exited children.
++    havekids = 0;
++    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
++      isthread = (char*)((uint)p->kstack + KSTACKSIZE - 1);
++      if(p->parent != curproc || *isthread != 1)
++        continue;
++      havekids = 1;
++      if(p->state == ZOMBIE){
++        //stack, & ret_p
++        *stack = (char*)p->stack;
++        *(uint*)ret_p = (uint)p->tf->eax;
++        // Found one.
++        kfree(p->kstack);
++        p->kstack = 0;
++        //freevm(p->pgdir);
++        p->pid = 0;
++        p->parent = 0;
++        p->name[0] = 0;
++        p->killed = 0;
++        p->state = UNUSED;
++        release(&ptable.lock);
++        return ;
++      }
++    }
++
++    // No point waiting if we don't have any children.
++    if(!havekids || curproc->killed){
++      release(&ptable.lock);
++      return ;
++    }
++
++    // Wait for children to exit.  (See wakeup1 call in proc_exit.)
++    sleep(curproc, &ptable.lock);  //DOC: wait-sleep
++  }
++}
++void thread_exit(void *ret){
++  struct proc *curproc = myproc();
++  struct proc *p;
++  int fd;
++
++  if(curproc == initproc)
++    panic("init exiting");
++
++  // Close all open files.
++  for(fd = 0; fd < NOFILE; fd++){
++    if(curproc->ofile[fd]){
++      fileclose(curproc->ofile[fd]);
++      curproc->ofile[fd] = 0;
++    }
++  }
++
++  //ret
++  curproc->tf->eax = (uint)ret;
++  
++  begin_op();
++  iput(curproc->cwd);
++  end_op();
++  curproc->cwd = 0;
++
++  acquire(&ptable.lock);
++
++  // Parent might be sleeping in wait().
++  wakeup1(curproc->parent);
++
++  // Pass abandoned children to init.
++  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
++    if(p->parent == curproc){
++      p->parent = initproc;
++      if(p->state == ZOMBIE)
++        wakeup1(initproc);
++    }
++  }
++
++  // Jump into the scheduler, never to return.
++  curproc->state = ZOMBIE;
++  sched();
++  panic("zombie exit");  
++}
++
++int set_priority(int pid, int prior){
++  struct proc *p;
++  
++  acquire(&ptable.lock);
++  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
++    if(p->pid == pid){
++      p->prior = prior;
++      
++      if (prior_new == 0) prior_new = prior;
++      else if (prior_new > prior) prior_new = prior;//最高优先级
++    }
++  }
++  release(&ptable.lock);
++  return 0;
++}
++
++int enable_sched_display(int i){
++  display_enabled = i;
++  return 0;
++}
+\ No newline at end of file
+diff -uNr proj2-base/proc.h proj2-revise/proc.h
+--- proj2-base/proc.h	2018-04-08 12:04:18.000000000 +0000
++++ proj2-revise/proc.h	2018-04-25 05:43:50.839911556 +0000
+@@ -49,6 +49,9 @@
+   struct file *ofile[NOFILE];  // Open files
+   struct inode *cwd;           // Current directory
+   char name[16];               // Process name (debugging)
++  char *stack;                 // user stack  
++  
++  int prior;                   // priority
+ };
+ 
+ // Process memory is laid out contiguously, low addresses first:
+diff -uNr proj2-base/schedtest.c proj2-revise/schedtest.c
+--- proj2-base/schedtest.c	2018-04-08 12:05:14.000000000 +0000
++++ proj2-revise/schedtest.c	2018-04-25 13:14:30.222251018 +0000
+@@ -7,7 +7,10 @@
+ 
+ void busy_computing(){
+ 	int i=1;
+-	while(i<=0xffffff)i++;
++	while(i<=0xffffff){
++		i++;
++		printf(1,"");
++	}
+ }
+ 
+ int main(){
+diff -uNr proj2-base/syscall.c proj2-revise/syscall.c
+--- proj2-base/syscall.c	2018-04-08 12:04:18.000000000 +0000
++++ proj2-revise/syscall.c	2018-04-25 05:40:12.528646795 +0000
+@@ -104,6 +104,11 @@
+ extern int sys_write(void);
+ extern int sys_uptime(void);
+ extern int sys_shutdown(void);
++extern int sys_clone(void);
++extern int sys_join(void);
++extern int sys_thread_exit(void);
++extern int sys_set_priority(void);
++extern int sys_enable_sched_display(void);
+ 
+ static int (*syscalls[])(void) = {
+ [SYS_fork]    sys_fork,
+@@ -128,6 +133,11 @@
+ [SYS_mkdir]   sys_mkdir,
+ [SYS_close]   sys_close,
+ [SYS_shutdown] sys_shutdown,
++[SYS_clone]   sys_clone,
++[SYS_join]    sys_join,
++[SYS_thread_exit] sys_thread_exit,
++[SYS_set_priority] sys_set_priority,
++[SYS_enable_sched_display] sys_enable_sched_display,
+ };
+ 
+ void
+diff -uNr proj2-base/sysproc.c proj2-revise/sysproc.c
+--- proj2-base/sysproc.c	2018-04-08 12:04:18.000000000 +0000
++++ proj2-revise/sysproc.c	2018-04-25 06:00:47.949666361 +0000
+@@ -94,4 +94,63 @@
+ sys_shutdown(void){
+   outw(0xB004, 0x0|0x2000);
+   return 0;
++}
++
++int
++sys_clone(void){
++  void *fn;
++  void *stack;
++  void *arg;
++  if (argptr(0, (char**)&fn, sizeof(void*)) < 0)
++    return -1;
++  if (argptr(1, (char**)&stack, sizeof(void*)) < 0)
++    return -1;
++  if (argptr(2, (char**)&arg, sizeof(void*)) < 0)
++    return -1;
++  return clone(fn, stack, arg);
++}
++
++int
++sys_join(void){
++  int tid;
++  void **ret_p;
++  void **stack;
++  if (argint(0, &tid) < 0)
++    return -1;
++  if (argptr(1, (char**)&ret_p, sizeof(void**)) < 0)
++    return -1;
++  if (argptr(2, (char**)&stack, sizeof(void**)) < 0)
++    return -1;
++  join(tid, ret_p, stack);
++  return 0;
++}
++
++int 
++sys_thread_exit(void){
++  void *ret;
++  if (argptr(0, (char**)&ret, sizeof(void*)) < 0)
++    return -1;
++  thread_exit(ret);
++  return 0;
++}
++
++int
++sys_set_priority(void){
++  int pid;
++  int prior;
++  if (argint(0, &pid) < 0)
++    return -1;
++  if (argint(1, &prior) < 0)
++    return -1;
++  set_priority(pid, prior);
++  return 0;
++}
++
++int
++sys_enable_sched_display(void){
++  int i;
++  if (argint(0, &i) < 0)
++    return -1;
++  enable_sched_display(i);
++  return 0;
+ }
+\ No newline at end of file
+diff -uNr proj2-base/trap.c proj2-revise/trap.c
+--- proj2-base/trap.c	2018-04-08 12:04:18.000000000 +0000
++++ proj2-revise/trap.c	2018-04-25 05:32:28.871731226 +0000
+@@ -80,6 +80,9 @@
+ 
+   //PAGEBREAK: 13
+   default:
++    if (tf->eip == 0xffffffff){
++      thread_exit((void*)tf->eax);
++    }
+     if(myproc() == 0 || (tf->cs&3) == 0){
+       // In kernel, it must be our mistake.
+       cprintf("unexpected trap %d from cpu %d eip %x (cr2=0x%x)\n",
+diff -uNr proj2-base/vm.c proj2-revise/vm.c
+--- proj2-base/vm.c	2018-04-08 12:04:18.000000000 +0000
++++ proj2-revise/vm.c	2018-04-25 05:32:28.871731226 +0000
+@@ -168,7 +168,7 @@
+                                 sizeof(mycpu()->ts)-1, 0);
+   mycpu()->gdt[SEG_TSS].s = 0;
+   mycpu()->ts.ss0 = SEG_KDATA << 3;
+-  mycpu()->ts.esp0 = (uint)p->kstack + KSTACKSIZE;
++  mycpu()->ts.esp0 = (uint)p->kstack + KSTACKSIZE - 1;
+   // setting IOPL=0 in eflags *and* iomb beyond the tss segment limit
+   // forbids I/O instructions (e.g., inb and outb) from user space
+   mycpu()->ts.iomb = (ushort) 0xFFFF;
+diff -uNr proj2-base/xthread.c proj2-revise/xthread.c
+--- proj2-base/xthread.c	2018-04-08 12:29:28.000000000 +0000
++++ proj2-revise/xthread.c	2018-04-25 05:32:28.871731226 +0000
+@@ -1,5 +1,6 @@
+ #include "types.h"
+ #include "user.h"
++#include "param.h"
+ 
+ extern int clone(void *(*fn)(void *),void *stack,void *arg);
+ extern void join(int tid,void **ret_p,void **stack);
+@@ -8,23 +9,24 @@
+ 
+ int xthread_create(int * tid, void * (* start_routine)(void *), void * arg)
+ {
+-    // add your implementation here ...
+-    return 0;
+-   
++    char *stack = malloc(sizeof(char)*USTACKSIZE);
++    if (stack==0) return -1;
++    
++    *tid = clone(start_routine, (void *)stack, arg);
++    if (*tid==-1) return -1;
++    return 1;
+ }
+ 
+ 
+ void xthread_exit(void * ret_val_p)
+ {
+-    // add your implementation here ...
+-   
+-    
++    thread_exit(ret_val_p);
+ }
+ 
+ 
+ void xthread_join(int tid, void ** retval)
+ {
+-    // add your implementation here ...
+-   
+-    
++    char *stack;
++    join(tid, retval, (void **)&stack);
++    free(stack);
+ }
