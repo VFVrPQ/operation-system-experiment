@@ -30,6 +30,7 @@
 实验难度太大，提示非常少。
 尤其是第一个实验，要理解的内容太多。
 来来回回，终于能了解个大概了，把程序写完整了。
+其中国权大佬的patch提供了很大的帮助。
 很感谢老师对我的每个问题都进行了很大的解答。
 
 1. thread，当父进程退出，子进程怎么释放用户栈的资源？ 没解决
@@ -38,3 +39,18 @@
     - 可能继续执行当前优先级的循环
     - 可能执行下一优先级
     - 重新scheduler
+
+以及，在`workplace`目录下创建了Makefile文件，这样就可以直接在`workplace`下直接`make`运行qemu.内容如下:
+
+```makefile
+DIR=proj2-revise
+all:
+	cd $(DIR) && make qemu
+	
+clean:
+	cd $(DIR) && make clean
+	
+diff:
+	diff -uNr  proj2-base  $(DIR) > 081520122.proj2.patch
+```
+
