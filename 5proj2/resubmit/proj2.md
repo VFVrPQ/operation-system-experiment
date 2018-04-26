@@ -50,7 +50,7 @@ all:
 clean:
 	cd $(DIR) && make clean
 	
-diff:
-	diff -uNr  proj2-base  $(DIR) > 081520122.proj2.patch
+diff:clean
+	diff -uNr  proj2-base  $(DIR) > 081520122.proj2.patch; [ $$? -eq 1 ]
 ```
 
