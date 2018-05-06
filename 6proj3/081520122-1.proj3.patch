@@ -1,0 +1,683 @@
+diff -uNr proj3-base/Makefile proj3-revise/Makefile
+--- proj3-base/Makefile	2018-04-28 14:20:58.000000000 +0000
++++ proj3-revise/Makefile	2018-05-04 10:52:14.301152493 +0000
+@@ -27,6 +27,7 @@
+ 	uart.o\
+ 	vectors.o\
+ 	vm.o\
++	my_sem.o\
+ 
+ # Cross-compiling (e.g., on Mac OS X)
+ # TOOLPREFIX = i386-jos-elf
+@@ -136,7 +137,7 @@
+ vectors.S: vectors.pl
+ 	perl vectors.pl > vectors.S
+ 
+-ULIB = ulib.o usys.o printf.o umalloc.o
++ULIB = ulib.o usys.o printf.o umalloc.o my_sem.o msg.o
+ 
+ _%: %.o $(ULIB)
+ 	$(LD) $(LDFLAGS) -N -e main -Ttext 0 -o $@ $^
+@@ -167,6 +168,8 @@
+ 	_wc\
+ 	_zombie\
+ 	_shutdown\
++	_semtest\
++	_msgtest\
+ 
+ fs.img: mkfs README $(UPROGS)
+ 	./mkfs fs.img README $(UPROGS)
+diff -uNr proj3-base/defs.h proj3-revise/defs.h
+--- proj3-base/defs.h	2018-04-28 14:20:58.000000000 +0000
++++ proj3-revise/defs.h	2018-05-06 13:18:48.050905101 +0000
+@@ -9,6 +9,7 @@
+ struct sleeplock;
+ struct stat;
+ struct superblock;
++struct semaphore;
+ 
+ // bio.c
+ void            binit(void);
+@@ -111,6 +112,8 @@
+ struct cpu*     mycpu(void);
+ struct proc*    myproc();
+ void            pinit(void);
++void            sinit(void);
++void            mbinit(void);
+ void            procdump(void);
+ void            scheduler(void) __attribute__((noreturn));
+ void            sched(void);
+@@ -121,6 +124,14 @@
+ void            wakeup(void*);
+ void            yield(void);
+ 
++int             s_alloc_sem(int);
++int             s_wait_sem(int);
++int             s_signal_sem(int);
++int             s_dealloc_sem(int);
++
++int             s_msg_send(int,int,int,int);
++int             s_msg_receive(int*,int*,int*);
++
+ // swtch.S
+ void            swtch(struct context**, struct context*);
+ 
+@@ -133,6 +144,18 @@
+ void            pushcli(void);
+ void            popcli(void);
+ 
++//my_sem.c
++int             alloc_sem(int);
++int             wait_sem(int);
++int             signal_sem(int);
++int             dealloc_sem(int);
++
++//proc_semaphore
++void            initsem(struct semaphore*, int, int, int);
++void            P(struct semaphore*, struct spinlock*);
++void            V(struct semaphore*, struct spinlock*);
++//int             killsem(struct semaphore*);
++
+ // sleeplock.c
+ void            acquiresleep(struct sleeplock*);
+ void            releasesleep(struct sleeplock*);
+diff -uNr proj3-base/main.c proj3-revise/main.c
+--- proj3-base/main.c	2018-04-28 14:20:58.000000000 +0000
++++ proj3-revise/main.c	2018-05-04 11:09:05.182355463 +0000
+@@ -27,6 +27,8 @@
+   consoleinit();   // console hardware
+   uartinit();      // serial port
+   pinit();         // process table
++  sinit();         // semaphore table
++  mbinit();        // mailbox
+   tvinit();        // trap vectors
+   binit();         // buffer cache
+   fileinit();      // file table
+diff -uNr proj3-base/msg.c proj3-revise/msg.c
+--- proj3-base/msg.c	1970-01-01 00:00:00.000000000 +0000
++++ proj3-revise/msg.c	2018-05-04 10:41:57.810745619 +0000
+@@ -0,0 +1,13 @@
++#include "param.h"
++#include "types.h"
++
++extern int s_msg_send(int,int,int,int);
++extern int s_msg_receive(int*,int*,int*);
++
++int msg_send(int pid, int a, int b, int c){
++    return s_msg_send(pid,a,b,c);
++}
++
++int msg_receive(int *a,int *b,int *c){
++    return s_msg_receive(a, b, c);
++}
+\ No newline at end of file
+diff -uNr proj3-base/my_sem.c proj3-revise/my_sem.c
+--- proj3-base/my_sem.c	1970-01-01 00:00:00.000000000 +0000
++++ proj3-revise/my_sem.c	2018-05-06 12:47:25.352755855 +0000
+@@ -0,0 +1,23 @@
++#include "param.h"
++#include "types.h"
++
++extern int s_alloc_sem(int);
++extern int s_wait_sem(int);
++extern int s_signal_sem(int);
++extern int s_dealloc_sem(int);
++
++int alloc_sem (int v){
++    return s_alloc_sem(v);
++}
++
++int wait_sem(int i){
++    return s_wait_sem(i);
++}
++
++int signal_sem(int i){
++    return s_signal_sem(i);
++}
++
++int dealloc_sem(int i){
++    return s_dealloc_sem(i);
++}
+\ No newline at end of file
+diff -uNr proj3-base/param.h proj3-revise/param.h
+--- proj3-base/param.h	2018-04-28 14:20:58.000000000 +0000
++++ proj3-revise/param.h	2018-05-05 02:28:01.088075271 +0000
+@@ -12,3 +12,5 @@
+ #define NBUF         (MAXOPBLOCKS*3)  // size of disk block cache
+ #define FSSIZE       1000  // size of file system in blocks
+ 
++#define NSEM         100 // maximum number of semaphore
++#define NMB          NPROC // maximum number of mailbox
+\ No newline at end of file
+diff -uNr proj3-base/proc.c proj3-revise/proc.c
+--- proj3-base/proc.c	2018-04-28 14:20:58.000000000 +0000
++++ proj3-revise/proc.c	2018-05-06 14:39:00.127587827 +0000
+@@ -6,12 +6,36 @@
+ #include "x86.h"
+ #include "proc.h"
+ #include "spinlock.h"
++#include "semaphore.h"
+ 
+ struct {
+   struct spinlock lock;
+   struct proc proc[NPROC];
+ } ptable;
+ 
++struct {
++  struct semaphore s[100];
++  struct spinlock  lock[100];
++  //struct semaphore empty;
++  int count;//资源数
++  struct spinlock lockcount;
++} stable;
++
++struct message{
++  int type;//=0,send;=1,receive
++  int a,b,c;
++  int sender;//pid
++  int receiver;//pid
++  int semid;
++  int done;//=0,not done;=1,done
++} mailbox[NMB];
++
++
++struct{
++  struct spinlock mailboxlock;
++  int semid;
++} mbtable;
++
+ static struct proc *initproc;
+ 
+ int nextpid = 1;
+@@ -20,12 +44,39 @@
+ 
+ static void wakeup1(void *chan);
+ 
++void freemailbox(int);
++void freesemaphore(int);
++
+ void
+ pinit(void)
+ {
+   initlock(&ptable.lock, "ptable");
+ }
+ 
++//semaphore
++void
++sinit(void)
++{
++  int i;
++  stable.count = NSEM;
++  initlock(&stable.lockcount, "stablelockcount");
++  
++  for (i=0;i<NSEM;i++){
++    initsem(&stable.s[i], 0, 0, -1);
++    initlock(&stable.lock[i], "semlock");
++  }
++}
++
++//mailtable
++void
++mbinit(void){
++  int i;
++  //mbtable.semid = s_alloc_sem(NMB);
++  initlock(&mbtable.mailboxlock, "mailboxlock");
++  for (i=0;i<NMB;i++){
++    mailbox[i].semid=-1;
++  }
++}
+ // Must be called with interrupts disabled
+ int
+ cpuid() {
+@@ -242,6 +293,10 @@
+     }
+   }
+ 
++  //free mailbox
++  freemailbox(curproc->pid);
++  freesemaphore(curproc->pid);
++  
+   begin_op();
+   iput(curproc->cwd);
+   end_op();
+@@ -287,6 +342,7 @@
+       if(p->state == ZOMBIE){
+         // Found one.
+         pid = p->pid;
++        //freemailbox(pid);//exit has free
+         kfree(p->kstack);
+         p->kstack = 0;
+         freevm(p->pgdir);
+@@ -532,3 +588,273 @@
+     cprintf("\n");
+   }
+ }
++
++
++//sem_atom{begin}
++void initsem(struct semaphore *sem, int isalloc, int u, int pid){
++  sem->isalloc = isalloc;
++  if (isalloc){
++    sem->pid   = pid;
++    sem->count = u;
++    sem->st    = 0;
++    sem->ed    = 0;
++  }
++}
++
++void P(struct semaphore *sem, struct spinlock *lock){
++  acquire(lock);
++  sem->count--;
++  if (sem->count < 0){
++      sem->waitqueue[sem->ed] = myproc();
++      sem->ed = (sem->ed + 1) % (NPROC + 1);
++      sleep(myproc(), lock);
++  }
++  release(lock);
++}
++
++void V(struct semaphore*sem, struct spinlock *lock){
++  acquire(lock);
++  sem->count++;
++  if (sem->count <= 0){
++      wakeup(sem->waitqueue[sem->st]);
++      sem->st = (sem->st + 1) % (NPROC + 1);
++  }
++  release(lock);
++}
++//sem_atom{end}
++
++int
++s_alloc_sem(int u){
++  int i;
++  if (u<0) return -1;
++  //P(&stable.empty, &stable.lockempty);//获取资源，防止资源还没释放的时候就去获取，导致出错
++  acquire(&stable.lockcount);
++  if (stable.count<=0){
++    release(&stable.lockcount);
++    return -1;
++  }
++  stable.count--;
++  release(&stable.lockcount);
++  
++  for (i = 0; i < NSEM; i++){
++    acquire(&stable.lock[i]);
++    if (stable.s[i].isalloc == 0){
++      initsem(&stable.s[i], 1, u, myproc()->pid);
++      release(&stable.lock[i]);
++      return i;
++    }
++    release(&stable.lock[i]);
++  }
++  return -1;//no use
++}
++
++int
++s_wait_sem(int i){
++  if (i>=NSEM || i<0) return -1;
++  acquire(&stable.lock[i]);
++  if (stable.s[i].isalloc==0){
++    release(&stable.lock[i]);
++    return -1;
++  }
++  release(&stable.lock[i]);
++  P(&stable.s[i], &stable.lock[i]);
++  return 1;
++}
++
++int
++s_signal_sem(int i){
++  if (i>=NSEM || i<0) return -1;
++  acquire(&stable.lock[i]);
++  if (stable.s[i].isalloc==0){
++    release(&stable.lock[i]);
++    return -1;
++  }
++  release(&stable.lock[i]);
++  V(&stable.s[i], &stable.lock[i]);
++  return 1;
++}
++
++int
++s_dealloc_sem(int i){
++  int j;
++  struct proc *p;
++  if (i>=NSEM || i<0) return -1;
++  acquire(&stable.lock[i]);
++  if (stable.s[i].isalloc == 0){
++    release(&stable.lock[i]);
++    return -1;
++  }
++  //still acquire stable.lock[i]
++  //they never wakeup，kill
++  stable.s[i].isalloc = 0;
++  for (j = stable.s[i].st; j != stable.s[i].ed; j = (j+1) % (NPROC + 1)){
++    p = stable.s[i].waitqueue[j];
++    release(&stable.lock[i]);
++    //递归删除
++    freemailbox(p->pid);
++    freesemaphore(p->pid);
++    //V(&stable.s[i], &stable.lock[i]);//signal,it has lock & isalloc = 1
++    acquire(&stable.lock[i]);  
++    acquire(&ptable.lock);
++    kfree(p->kstack);
++    p->kstack = 0;
++    freevm(p->pgdir);
++    p->pid = 0;
++    p->parent = 0;
++    p->name[0] = 0;
++    p->killed = 0;
++    p->state = UNUSED;
++    release(&ptable.lock);
++  }
++  release(&stable.lock[i]);
++  
++  acquire(&stable.lockcount);
++  stable.count++;
++  release(&stable.lockcount);
++  //V(&stable.empty, &stable.lockempty);//释放资源
++  return 1;
++}
++
++void mailbox_print(int i){
++  //cprintf("mailbox_print:%d %d %d %d\n",mailbox[i].semid,mailbox[i].type, mailbox[i].sender, mailbox[i].receiver);
++}
++//send but failed, need to free
++void freemailbox(int pid){
++    int i;
++    acquire(&mbtable.mailboxlock);
++    for (i = 0; i < NMB; i++)if (mailbox[i].semid>=0){
++      if ((mailbox[i].type == 0 && mailbox[i].sender == pid) 
++      || (mailbox[i].type == 1 && mailbox[i].receiver == pid)){
++        //freesemaphore will dealloc_sem, so there is no need to dealloc_sem
++        mailbox[i].semid = -1;
++      }
++    }
++    release(&mbtable.mailboxlock);
++}
++
++void freesemaphore(int pid){
++  int i;
++  for (i=0;i<NSEM;i++){
++    acquire(&stable.lock[i]);
++    if (stable.s[i].isalloc != 0 && stable.s[i].pid == pid){
++      release(&stable.lock[i]);
++      if (s_dealloc_sem(i)<0){
++        cprintf("freesemaphore: dealloc failed!\n");
++      }
++      acquire(&stable.lock[i]);
++    }
++    release(&stable.lock[i]);
++  }
++}
++
++int
++s_msg_send(int pid, int a, int b, int c){
++  int i,flag;
++  struct proc *p;
++  //pid is true
++  flag=0;
++  acquire(&ptable.lock);
++  for (p=ptable.proc; p<&ptable.proc[NPROC]; p++){
++    if (p->pid==pid) flag=1;  
++  }
++  release(&ptable.lock);
++  if (!flag) return -1;
++  
++  acquire(&mbtable.mailboxlock);
++  for (i = 0; i < NMB; i++){
++    if (mailbox[i].semid < 0)
++      continue;
++    if (mailbox[i].type==1 && mailbox[i].receiver == pid && mailbox[i].done==0){
++      mailbox[i].a = a;//哦哦不能用指针，这样是映射到进程的地址空间上，不是同一个进程
++      mailbox[i].b = b;
++      mailbox[i].c = c;
++      mailbox[i].done = 1;
++      mailbox[i].sender = myproc()->pid; 
++      s_signal_sem(mailbox[i].semid);
++      release(&mbtable.mailboxlock);
++      return 1;
++    }
++  }
++  //still acquire mbtable.mailboxlock
++  for (i = 0; i < NMB; i++){
++    if (mailbox[i].semid >= 0)
++      continue;
++    mailbox[i].type = 0;
++    mailbox[i].a = a;
++    mailbox[i].b = b;
++    mailbox[i].c = c;
++    mailbox[i].done = 0;
++    mailbox[i].sender = myproc()->pid;
++    mailbox[i].receiver = pid;
++    if ((mailbox[i].semid = s_alloc_sem(0))<0){
++      cprintf("no alloc\n");
++      release(&mbtable.mailboxlock);
++      return -1;
++    }
++    release(&mbtable.mailboxlock);
++    if (s_wait_sem(mailbox[i].semid)<0){
++      cprintf("wait failed\n");
++      return -1;
++    }
++    //wait is ok,then done=1,only itself can operate
++    if (s_dealloc_sem(mailbox[i].semid)<0){//lock
++      cprintf("dealloc_sem failed\n");
++      return -1;
++    }
++    mailbox[i].semid = -1;
++    return 1;
++  }
++  release(&mbtable.mailboxlock);
++  return -1;
++}
++
++int
++s_msg_receive(int *a, int *b, int *c){
++  int i,t;
++  acquire(&mbtable.mailboxlock);
++  for (i = 0; i < NMB; i++){
++    if (mailbox[i].semid < 0)
++      continue;
++    if (mailbox[i].type==0 && mailbox[i].receiver == myproc()->pid && mailbox[i].done == 0){
++      mailbox[i].done = 1;
++      *a = mailbox[i].a;
++      *b = mailbox[i].b;
++      *c = mailbox[i].c;
++      t  = mailbox[i].sender;
++      release(&mbtable.mailboxlock);
++      s_signal_sem(mailbox[i].semid);
++      return t;
++    }
++  }
++  for (i = 0; i < NMB; i++){
++    if (mailbox[i].semid >= 0)
++      continue;
++    mailbox[i].type = 1;
++    mailbox[i].sender = 0;
++    mailbox[i].done = 0;
++    mailbox[i].receiver = myproc()->pid;
++    if ((mailbox[i].semid = s_alloc_sem(0))<0){
++      cprintf("no alloc\n");
++      release(&mbtable.mailboxlock);
++      return -1;
++    }
++    release(&mbtable.mailboxlock);
++    if (s_wait_sem(mailbox[i].semid)<0){
++      cprintf("wait failed\n");
++      return -1;
++    }
++    //wait ok, done=1, only itself can operate, so don't need lock
++    *a = mailbox[i].a;
++    *b = mailbox[i].b;
++    *c = mailbox[i].c;
++    t = mailbox[i].sender;//tmp
++    if (s_dealloc_sem(mailbox[i].semid)<0){
++      cprintf("dealloc_sem failed\n");
++      return -1;
++    }
++    mailbox[i].semid = -1;
++    return t;
++  }
++  release(&mbtable.mailboxlock);
++  return -1;
++}
+\ No newline at end of file
+diff -uNr proj3-base/semaphore.h proj3-revise/semaphore.h
+--- proj3-base/semaphore.h	1970-01-01 00:00:00.000000000 +0000
++++ proj3-revise/semaphore.h	2018-05-06 13:09:55.995953004 +0000
+@@ -0,0 +1,7 @@
++struct semaphore{
++  uint isalloc;//是否已经分配  
++  int count;
++  int pid; //创建的pid
++  int st,ed;//head,tail
++  struct proc *waitqueue[NPROC+1];//queue,多一个防止冲突
++};
+\ No newline at end of file
+diff -uNr proj3-base/spinlock.c proj3-revise/spinlock.c
+--- proj3-base/spinlock.c	2018-04-28 14:20:58.000000000 +0000
++++ proj3-revise/spinlock.c	2018-05-04 02:34:41.234485097 +0000
+@@ -25,8 +25,10 @@
+ acquire(struct spinlock *lk)
+ {
+   pushcli(); // disable interrupts to avoid deadlock.
+-  if(holding(lk))
++  if(holding(lk)){
++    panic(lk->name);
+     panic("acquire");
++  }
+ 
+   // The xchg is atomic.
+   while(xchg(&lk->locked, 1) != 0)
+diff -uNr proj3-base/syscall.c proj3-revise/syscall.c
+--- proj3-base/syscall.c	2018-04-28 14:20:58.000000000 +0000
++++ proj3-revise/syscall.c	2018-05-04 10:44:13.650733811 +0000
+@@ -104,6 +104,12 @@
+ extern int sys_write(void);
+ extern int sys_uptime(void);
+ extern int sys_shutdown(void);
++extern int sys_s_alloc_sem(void);
++extern int sys_s_wait_sem(void);
++extern int sys_s_signal_sem(void);
++extern int sys_s_dealloc_sem(void);
++extern int sys_s_msg_send(void);
++extern int sys_s_msg_receive(void);
+ 
+ static int (*syscalls[])(void) = {
+ [SYS_fork]    sys_fork,
+@@ -128,6 +134,12 @@
+ [SYS_mkdir]   sys_mkdir,
+ [SYS_close]   sys_close,
+ [SYS_shutdown] sys_shutdown,
++[SYS_s_alloc_sem] sys_s_alloc_sem,
++[SYS_s_wait_sem] sys_s_wait_sem,
++[SYS_s_signal_sem] sys_s_signal_sem,
++[SYS_s_dealloc_sem] sys_s_dealloc_sem,
++[SYS_s_msg_send] sys_s_msg_send,
++[SYS_s_msg_receive] sys_s_msg_receive,
+ };
+ 
+ void
+diff -uNr proj3-base/syscall.h proj3-revise/syscall.h
+--- proj3-base/syscall.h	2018-04-28 14:20:58.000000000 +0000
++++ proj3-revise/syscall.h	2018-05-04 10:43:05.244696818 +0000
+@@ -21,3 +21,11 @@
+ #define SYS_mkdir  20
+ #define SYS_close  21
+ #define SYS_shutdown 22
++
++#define SYS_s_alloc_sem 23
++#define SYS_s_wait_sem 24
++#define SYS_s_signal_sem 25
++#define SYS_s_dealloc_sem 26
++
++#define SYS_s_msg_send 27
++#define SYS_s_msg_receive 28
+\ No newline at end of file
+diff -uNr proj3-base/sysproc.c proj3-revise/sysproc.c
+--- proj3-base/sysproc.c	2018-04-28 14:20:58.000000000 +0000
++++ proj3-revise/sysproc.c	2018-05-04 10:47:08.726184656 +0000
+@@ -94,4 +94,52 @@
+ sys_shutdown(void){
+   outw(0xB004, 0x0|0x2000);
+   return 0;
++}
++
++int
++sys_s_alloc_sem(void){
++  int v;
++  if (argint(0, &v)<0)
++    return -1;
++  return s_alloc_sem(v);
++}
++
++int
++sys_s_wait_sem(void){
++  int i;
++  if (argint(0, &i)<0)
++    return -1;
++  return s_wait_sem(i);
++}
++
++int
++sys_s_signal_sem(void){
++  int i;
++  if (argint(0, &i)<0)
++    return -1;
++  return s_signal_sem(i);
++}
++
++int
++sys_s_dealloc_sem(void){
++  int i;
++  if (argint(0, &i)<0)
++    return -1;
++  return s_dealloc_sem(i);
++}
++
++int
++sys_s_msg_send(void){
++  int pid,a,b,c;
++  if (argint(0, &pid)<0 || argint(1, &a)<0 || argint(2, &b)<0 || argint(3, &c)<0)
++    return -1;
++  return s_msg_send(pid,a,b,c);
++}
++
++int
++sys_s_msg_receive(void){
++  int *a,*b,*c;
++  if (argptr(0,(char**)&a,sizeof(int))<0 || argptr(1,(char**)&b,sizeof(int))<0 || argptr(2,(char**)&c,sizeof(int))<0)
++    return -1;
++  return s_msg_receive(a,b,c);
+ }
+\ No newline at end of file
+diff -uNr proj3-base/user.h proj3-revise/user.h
+--- proj3-base/user.h	2018-04-28 14:20:58.000000000 +0000
++++ proj3-revise/user.h	2018-05-03 11:56:42.417777184 +0000
+@@ -24,6 +24,11 @@
+ int sleep(int);
+ int uptime(void);
+ 
++int s_alloc_sem(int);
++int s_wait_sem(int);
++int s_signal_sem(int);
++int s_dealloc_sem(int);
++
+ // ulib.c
+ int stat(char*, struct stat*);
+ char* strcpy(char*, char*);
+diff -uNr proj3-base/usys.S proj3-revise/usys.S
+--- proj3-base/usys.S	2018-04-28 14:20:58.000000000 +0000
++++ proj3-revise/usys.S	2018-05-04 10:50:20.143077714 +0000
+@@ -30,3 +30,9 @@
+ SYSCALL(sleep)
+ SYSCALL(uptime)
+ SYSCALL(shutdown)
++SYSCALL(s_alloc_sem)
++SYSCALL(s_wait_sem)
++SYSCALL(s_signal_sem)
++SYSCALL(s_dealloc_sem)
++SYSCALL(s_msg_send)
++SYSCALL(s_msg_receive)
+\ No newline at end of file
